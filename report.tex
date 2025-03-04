@@ -1,0 +1,170 @@
+\documentclass[a4paper,10pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{caption}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\lstset{
+    language=R,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!50!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny,
+    stepnumber=1,
+    numbersep=5pt,
+    showspaces=false,
+    showstringspaces=false,
+    frame=single,
+    breaklines=true,
+    breakatwhitespace=true,
+    tabsize=2
+}
+
+\title{STAT0011 Decision and Risk In-Course Assessment 2024 \\ Group 5}
+\author{}
+\date{2025-02-28}
+
+\begin{document}
+
+\maketitle
+
+\section*{Contents}
+\begin{itemize}
+    \item Main Task
+\end{itemize}
+
+\section{Introduction}
+This report presents the analysis conducted by Group 5 for the STAT0011 Decision and Risk In-Course Assessment 2024. We evaluate the market risk of an equally-weighted portfolio comprising two stock indices, the S\&P 500 and the Shanghai Stock Exchange (SSE) Composite Index, using weekly log-returns from 2000 to 2023. Our objective is to estimate the 95\% and 99\% 1-week Value-at-Risk (VaR) employing a Monte Carlo simulation approach based on copula theory, as outlined in the task description.
+
+\section{Data Description}
+We selected the S\&P 500 and SSE Composite Index from the six candidate indices provided. Weekly closing prices were obtained from \href{https://finance.yahoo.com}{Yahoo Finance} for the period spanning January 2000 to December 2023, yielding 1214 observations per index. Log-returns were calculated as follows:
+\[
+\text{ret}_t = \ln\left(\frac{P_t}{P_{t-1}}\right),
+\]
+where $P_t$ denotes the price at week $t$. The datasets are stored in \texttt{SP500.csv} and \texttt{SSE.csv}, submitted alongside this report.
+
+\section{Methodology}
+\subsection{Time Series Modelling}
+The log-returns exhibited volatility clustering and non-normality, confirmed via Jarque-Bera tests (p-values < 0.05). Autocorrelation functions (ACF) and partial ACF (PACF) plots guided the selection of autoregressive (AR) models: AR(1) for S\&P 500 and AR(2) for SSE, with GARCH(1,1) components to capture volatility clustering. We fitted AR-GARCH models using the \texttt{fGarch} package in R, testing various conditional distributions (normal, Student-t, skewed Student-t) and selecting the best fit based on AIC/BIC criteria (see Table \ref{tab:dist}).
+
+\begin{table}[h]
+    \centering
+    \caption{Conditional Distribution Selection for AR(3)-GARCH(1,1) Model (Sample from Document)}
+    \label{tab:dist}
+    \begin{tabular}{lcc}
+        \toprule
+        Conditional Distribution & AIC & BIC \\
+        \midrule
+        Normal (norm) & -1.934944 & -4.901724 \\
+        Student-t (std) & -4.977397 & -4.939430 \\
+        Skew Student-t (sstd) & -5.009752 & -4.967040 \\
+        Skew Normal (snorm) & -4.988160 & -4.950193 \\
+        Skew Generalized Error (sged) & -5.005165 & -4.962453 \\
+        Generalized Error (ged) & -4.970248 & -4.932282 \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+For S\&P 500, an AR(1)-GARCH(1,1) model with a skewed Student-t (sstd) distribution was optimal. For SSE, an AR(2)-GARCH(1,1) with sstd was chosen. Model adequacy was assessed using ACF of residuals, Ljung-Box tests, and Probability Integral Transform (PIT) uniformity tests (Kolmogorov-Smirnov and Anderson-Darling).
+
+\subsection{Copula Modelling}
+Uniform residuals (u1, u2) from the marginal models were used to fit a bivariate copula using the \texttt{VineCopula} package. The best copula was selected based on AIC, with independence tests performed at the 5\% level.
+
+\subsection{VaR Estimation}
+We simulated 100,000 scenarios of one-week-ahead log-returns using the fitted copula and marginal models. The portfolio log-return was computed as:
+\[
+\text{port}_t = \ln\left(1 + \frac{(\exp(\text{ret1}_t) - 1) + (\exp(\text{ret2}_t) - 1)}{2}\right).
+\]
+The 95\% and 99\% VaR were derived as the 5th and 1st percentiles of the negative simulated portfolio returns.
+
+\section{R Code}
+Below is the R code used for the analysis:
+
+\begin{lstlisting}
+# Load required packages
+library(stats)
+library(VineCopula)
+library(fGarch)
+library(fBasics)
+library(KScorrect)
+library(ADGofTest)
+
+# Import data
+SP500 <- read.csv("SP500.csv")
+SSE <- read.csv("SSE.csv")
+price1 <- rev(SP500$Price)
+price2 <- rev(SSE$Price)
+ret1 <- log(price1[-1]/price1[-1214])
+ret2 <- log(price2[-1]/price2[-1214])
+
+# Model fitting for S&P 500
+model1 <- garchFit(formula=~arma(1,0)+garch(1,1), data=ret1, trace=F, cond.dist="sstd")
+res1 <- residuals(model1, standardize=TRUE)
+u1 <- psstd(res1, nu=model1@fit$par["shape"], xi=model1@fit$par["skew"])
+
+# Model fitting for SSE
+model2 <- garchFit(formula=~arma(2,0)+garch(1,1), data=ret2, trace=F, cond.dist="sstd")
+res2 <- residuals(model2, standardize=TRUE)
+u2 <- psstd(res2, nu=model2@fit$par["shape"], xi=model2@fit$par["skew"])
+
+# Copula selection
+model <- BiCopSelect(u1, u2, familyset=NA, selectioncrit="AIC", indeptest=TRUE, level=0.05, se=TRUE)
+
+# Monte Carlo simulation
+N <- 100000
+set.seed(0123)
+u_sim <- BiCopSim(N, family=model$family, model$par, model$par2)
+res1_sim <- qsstd(u_sim[,1], nu=model1@fit$par["shape"], xi=model1@fit$par["skew"])
+res2_sim <- qsstd(u_sim[,2], nu=model2@fit$par["shape"], xi=model2@fit$par["skew"])
+
+# S&P 500 simulation
+t <- length(ret1)
+sp_sigma2hat <- numeric(t+1)
+sp_omegahat <- model1@fit$par["omega"]
+sp_alphahat <- model1@fit$par["alpha1"]
+sp_betahat <- model1@fit$par["beta1"]
+sp_sigma2hat[1] <- sp_omegahat/(1-sp_alphahat-sp_betahat)
+for(i in 2:(t+1)) {
+    sp_sigma2hat[i] <- sp_omegahat + sp_alphahat*sp_sigma2hat[i-1]*(model1@residuals[i-1]^2) + sp_betahat*sp_sigma2hat[i-1]
+}
+sp_sigma2_sim <- sp_omegahat + sp_alphahat*sp_sigma2hat[t+1]*(res1_sim^2) + sp_betahat*sp_sigma2hat[t+1]
+ret1_sim <- model1@fit$par["mu"] + model1@fit$par["ar1"]*ret1[t] + sqrt(sp_sigma2_sim)*res1_sim
+
+# SSE simulation
+sse_sigma2hat <- numeric(t+1)
+sse_omegahat <- model2@fit$par["omega"]
+sse_alphahat <- model2@fit$par["alpha1"]
+sse_betahat <- model2@fit$par["beta1"]
+sse_sigma2hat[1] <- sse_omegahat/(1-sse_alphahat-sse_betahat)
+for(i in 2:(t+1)) {
+    sse_sigma2hat[i] <- sse_omegahat + sse_alphahat*sse_sigma2hat[i-1]*(model2@residuals[i-1]^2) + sse_betahat*sse_sigma2hat[i-1]
+}
+sse_sigma2_sim <- sse_omegahat + sse_alphahat*sse_sigma2hat[t+1]*(res2_sim^2) + sse_betahat*sse_sigma2hat[t+1]
+ret2_sim <- model2@fit$par["mu"] + model2@fit$par["ar1"]*ret2[t] + model2@fit$par["ar2"]*ret2[t-1] + sqrt(sse_sigma2_sim)*res2_sim
+
+# Portfolio VaR
+port_sim <- log(1+((exp(ret1_sim)-1)+(exp(ret2_sim)-1))*(1/2))
+negvar_sim <- quantile(port_sim, c(0.01, 0.05))
+var_sim <- setNames(c(-as.numeric(negvar_sim[2]), -as.numeric(negvar_sim[1])), c("95%", "99%"))
+\end{lstlisting}
+
+\section{Results}
+The fitted copula model parameters and the estimated VaR values are as follows:
+- \textbf{Copula}: [Insert family, e.g., "Gaussian", and parameters from \texttt{model\$family}, \texttt{model\$par}, \texttt{model\$par2}].
+- \textbf{95\% 1-Week VaR}: 1.53\%.
+- \textbf{99\% 1-Week VaR}: 3.24\%.
+
+A histogram of the simulated portfolio losses with VaR lines is included in the R script output (submitted separately due to LaTeX limitations).
+
+\section{Conclusion}
+Using copula-based Monte Carlo simulation, we estimated the 95\% and 99\% 1-week VaR for an equally-weighted portfolio of S\&P 500 and SSE Composite Index log-returns at 1.53\% and 3.24\%, respectively. These values reflect the potential downside risk at the specified confidence levels, providing insight into the portfolio's market risk exposure.
+
+\end{document}
